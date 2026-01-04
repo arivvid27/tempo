@@ -91,7 +91,7 @@ class _ReaderPageState extends State<ReaderPage> {
 
     // Measure the actual width of the word spacing (3 spaces)
     final spacePainter = TextPainter(
-      text: const TextSpan(text: '   ', style: textStyle),
+      text: const TextSpan(text: '  ', style: textStyle),
       textDirection: TextDirection.ltr,
     );
     spacePainter.layout();
