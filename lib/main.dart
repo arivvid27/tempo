@@ -29,35 +29,31 @@ class _ReaderPageState extends State<ReaderPage> {
   bool _isPlaying = false;
   bool _showRestart = false;
   bool _isHoveringRestart = false;
-  int _wpm = 300; 
+  int _wpm = 300;
+  bool _showSentenceContext = false; 
 
-  // Colors
   final Color _cream = const Color(0xFFF5F5DC);
   final Color _softRed = const Color(0xFFE57373);
   final Color _lightCharcoal = const Color(0xFF2C2C2C);
+  final Color _lighterCharcoal = const Color(0xFF3A3A3A);
+
+  // Constants for pixel-perfect alignment
+  static const double _fontSize = 48.0;
+  static const double _letterSpacing = 4.0;
+  static const String _fontFamily = 'monospace';
 
   int _calculateORP(String word) {
     int length = word.length;
     if (length == 1) return 0;
-    if (length == 2) return 1;
-    if (length == 3) return 1;
+    if (length <= 3) return 1;
     return (length * 0.35).floor();
   }
 
-  // REFINED TIMER: Handles the "Offbeat" pause for punctuation
   void _runTimer() {
     _timer?.cancel();
-    
-    // Calculate base speed
     int baseMs = (60000 / _wpm).round();
     String currentWord = _words[_currentIndex];
-    
-    // Check for sentence-ending punctuation
-    bool isEndOfSentence = currentWord.endsWith('.') || 
-                           currentWord.endsWith('?') || 
-                           currentWord.endsWith('!');
-    
-    // If it's a period, we wait for 2 beats instead of 1
+    bool isEndOfSentence = currentWord.endsWith('.') || currentWord.endsWith('?') || currentWord.endsWith('!');
     int duration = isEndOfSentence ? (baseMs * 2) : baseMs;
 
     _timer = Timer(Duration(milliseconds: duration), () {
@@ -65,7 +61,7 @@ class _ReaderPageState extends State<ReaderPage> {
       setState(() {
         if (_currentIndex < _words.length - 1) {
           _currentIndex++;
-          _runTimer(); // Recursively trigger the next word with its own timing
+          _runTimer();
         } else {
           _isPlaying = false;
           _showRestart = true;
@@ -76,37 +72,122 @@ class _ReaderPageState extends State<ReaderPage> {
 
   void _togglePlayback() {
     if (_showRestart) return;
-    if (_isPlaying) { 
-      _timer?.cancel(); 
-    } else { 
-      _runTimer(); 
-    }
+    if (_isPlaying) { _timer?.cancel(); } else { _runTimer(); }
     setState(() => _isPlaying = !_isPlaying);
   }
 
   void _updateWPM(int delta) {
     setState(() => _wpm = (_wpm + delta).clamp(30, 900));
-    // If it's playing, we restart the timer loop to apply the new speed immediately
     if (_isPlaying) _runTimer();
+  }
+
+  Widget _buildMovingSentence(double screenWidth) {
+    const textStyle = TextStyle(
+      fontSize: _fontSize,
+      fontFamily: _fontFamily,
+      letterSpacing: _letterSpacing,
+    );
+
+    // Measure the actual width of the word spacing (3 spaces)
+    final spacePainter = TextPainter(
+      text: const TextSpan(text: '   ', style: textStyle),
+      textDirection: TextDirection.ltr,
+    );
+    spacePainter.layout();
+    final wordSpacing = spacePainter.width;
+
+    // Calculate the actual width before the pivot character
+    double widthBeforePivot = 0;
+    
+    // Add width of all words before the current word
+    for (int i = 0; i < _currentIndex; i++) {
+      final wordPainter = TextPainter(
+        text: TextSpan(text: _words[i], style: textStyle),
+        textDirection: TextDirection.ltr,
+      );
+      wordPainter.layout();
+      widthBeforePivot += wordPainter.width;
+      
+      // Add spacing after word (except after the last word before current)
+      if (i < _currentIndex - 1) {
+        widthBeforePivot += wordSpacing;
+      }
+    }
+    
+    // Add spacing before current word if there are words before it
+    if (_currentIndex > 0) {
+      widthBeforePivot += wordSpacing;
+    }
+    
+    // Add width of the prefix (characters before the pivot) of the current word
+    String currentWord = _words[_currentIndex];
+    int orpIndex = _calculateORP(currentWord);
+    String prefix = currentWord.substring(0, orpIndex);
+    String pivot = currentWord.substring(orpIndex, orpIndex + 1);
+    
+    if (prefix.isNotEmpty) {
+      final prefixPainter = TextPainter(
+        text: TextSpan(text: prefix, style: textStyle),
+        textDirection: TextDirection.ltr,
+      );
+      prefixPainter.layout();
+      widthBeforePivot += prefixPainter.width;
+    }
+    
+    // Measure the pivot character width to center it perfectly
+    final pivotPainter = TextPainter(
+      text: TextSpan(text: pivot, style: textStyle),
+      textDirection: TextDirection.ltr,
+    );
+    pivotPainter.layout();
+    double pivotWidth = pivotPainter.width;
+
+    // Center the pivot character: screen center - width before pivot - half of pivot width
+    double screenCenter = screenWidth / 2;
+    double xOffset = screenCenter - widthBeforePivot - (pivotWidth / 2);
+
+    return Transform(
+      transform: Matrix4.translationValues(xOffset, 0, 0),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(_words.length, (index) {
+          String word = _words[index];
+          int orp = _calculateORP(word);
+          
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildWordSpans(word, orp, index == _currentIndex),
+              if (index < _words.length - 1) 
+                SizedBox(width: wordSpacing),
+            ],
+          );
+        }),
+      ),
+    );
+  }
+
+  Widget _buildWordSpans(String word, int orp, bool isActive) {
+    const style = TextStyle(fontSize: _fontSize, fontFamily: _fontFamily, letterSpacing: _letterSpacing);
+    
+    if (!isActive) {
+      return Text(word, style: style.copyWith(color: _lighterCharcoal));
+    }
+
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(text: word.substring(0, orp), style: style.copyWith(color: _cream)),
+          TextSpan(text: word.substring(orp, orp + 1), style: style.copyWith(color: _softRed)),
+          TextSpan(text: word.substring(orp + 1), style: style.copyWith(color: _cream)),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    String word = _words[_currentIndex];
-    int orpIndex = _calculateORP(word);
-    
-    String prefix = word.substring(0, orpIndex);
-    String pivot = word.substring(orpIndex, orpIndex + 1);
-    String suffix = word.substring(orpIndex + 1);
-
-    const textStyle = TextStyle(
-      fontSize: 48, 
-      fontWeight: FontWeight.w400, 
-      fontFamily: 'monospace', 
-      letterSpacing: 0,
-    );
-
-    const double pivotWidth = 40.0; 
+    double screenWidth = MediaQuery.of(context).size.width;
 
     return Scaffold(
       body: CallbackShortcuts(
@@ -123,6 +204,7 @@ class _ReaderPageState extends State<ReaderPage> {
               color: Colors.transparent,
               child: Stack(
                 children: [
+                  // 1. Center Guides
                   Center(
                     child: CustomPaint(
                       size: const Size(double.infinity, 140),
@@ -130,74 +212,138 @@ class _ReaderPageState extends State<ReaderPage> {
                     ),
                   ),
 
+                  // 2. The Moving Tape
                   Center(
-                    child: SizedBox(
-                      width: 600, 
-                      height: 100,
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          SizedBox(
-                            width: pivotWidth,
-                            child: Center(
-                              child: Text(pivot, style: textStyle.copyWith(color: _softRed)),
-                            ),
-                          ),
-                          Positioned(
-                            right: (600 / 2) + (pivotWidth / 2),
-                            child: Text(
-                              prefix, 
-                              style: textStyle.copyWith(color: _cream),
-                              textAlign: TextAlign.right,
-                            ),
-                          ),
-                          Positioned(
-                            left: (600 / 2) + (pivotWidth / 2),
-                            child: Text(
-                              suffix, 
-                              style: textStyle.copyWith(color: _cream),
-                              textAlign: TextAlign.left,
-                            ),
-                          ),
-                        ],
-                      ),
+                    child: SingleChildScrollView( // Prevents overflow if zoomed
+                      scrollDirection: Axis.horizontal,
+                      physics: const NeverScrollableScrollPhysics(),
+                      child: _showSentenceContext 
+                        ? _buildMovingSentence(screenWidth)
+                        : _buildStaticRSVP(),
                     ),
                   ),
 
-                  Positioned(
-                    bottom: 40,
-                    right: 40,
-                    child: Text('$_wpm wpm', style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 18)),
-                  ),
-
-                  Positioned(
-                    bottom: 40,
-                    left: 40,
-                    child: AnimatedOpacity(
-                      opacity: _showRestart ? 1.0 : 0.0,
-                      duration: const Duration(milliseconds: 500),
-                      child: IgnorePointer(
-                        ignoring: !_showRestart,
-                        child: MouseRegion(
-                          onEnter: (_) => setState(() => _isHoveringRestart = true),
-                          onExit: (_) => setState(() => _isHoveringRestart = false),
-                          child: GestureDetector(
-                            onTap: () => setState(() { _currentIndex = 0; _showRestart = false; }),
-                            child: AnimatedRotation(
-                              turns: _isHoveringRestart ? 1 : 0,
-                              duration: const Duration(milliseconds: 600),
-                              child: Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(color: _lightCharcoal, shape: BoxShape.circle),
-                                child: Icon(Icons.refresh, color: _cream, size: 28),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                  // 3. UI Controls
+                  Positioned(bottom: 40, right: 40, child: _buildControls()),
+                  _buildRestartButton(),
                 ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStaticRSVP() {
+    String word = _words[_currentIndex];
+    int orp = _calculateORP(word);
+    
+    // Measure the pivot character to center it perfectly
+    const textStyle = TextStyle(fontSize: _fontSize, fontFamily: _fontFamily, letterSpacing: _letterSpacing);
+    final pivotPainter = TextPainter(
+      text: TextSpan(text: word.substring(orp, orp + 1), style: textStyle),
+      textDirection: TextDirection.ltr,
+    );
+    pivotPainter.layout();
+    double pivotWidth = pivotPainter.width;
+
+    return SizedBox(
+      width: 600,
+      height: 100,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // Pivot character centered
+          SizedBox(
+            width: pivotWidth,
+            child: Center(
+              child: Text(word.substring(orp, orp + 1), style: textStyle.copyWith(color: _softRed)),
+            ),
+          ),
+          // Prefix positioned to the left
+          if (orp > 0)
+            Positioned(
+              right: 300 + (pivotWidth / 2),
+              child: Text(
+                word.substring(0, orp), 
+                style: textStyle.copyWith(color: _cream), 
+                textAlign: TextAlign.right,
+              ),
+            ),
+          // Suffix positioned to the right
+          if (orp < word.length - 1)
+            Positioned(
+              left: 300 + (pivotWidth / 2),
+              child: Text(
+                word.substring(orp + 1), 
+                style: textStyle.copyWith(color: _cream), 
+                textAlign: TextAlign.left,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControls() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        GestureDetector(
+          onTap: () => setState(() => _showSentenceContext = !_showSentenceContext),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Context', style: TextStyle(color: _lighterCharcoal, fontSize: 12, fontStyle: FontStyle.italic)),
+              const SizedBox(width: 8),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 38, height: 20,
+                decoration: BoxDecoration(
+                  color: _showSentenceContext ? _softRed : _lightCharcoal,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: AnimatedAlign(
+                  duration: const Duration(milliseconds: 200),
+                  alignment: _showSentenceContext ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    width: 14, height: 14,
+                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                    decoration: BoxDecoration(color: _cream, shape: BoxShape.circle),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text('$_wpm wpm', style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 18)),
+      ],
+    );
+  }
+
+  Widget _buildRestartButton() {
+    return Positioned(
+      bottom: 40, left: 40,
+      child: AnimatedOpacity(
+        opacity: _showRestart ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 500),
+        child: IgnorePointer(
+          ignoring: !_showRestart,
+          child: MouseRegion(
+            onEnter: (_) => setState(() => _isHoveringRestart = true),
+            onExit: (_) => setState(() => _isHoveringRestart = false),
+            child: GestureDetector(
+              onTap: () => setState(() { _currentIndex = 0; _showRestart = false; }),
+              child: AnimatedRotation(
+                turns: _isHoveringRestart ? 1 : 0,
+                duration: const Duration(milliseconds: 600),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(color: _lightCharcoal, shape: BoxShape.circle),
+                  child: Icon(Icons.refresh, color: _cream, size: 28),
+                ),
               ),
             ),
           ),
