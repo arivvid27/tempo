@@ -41,6 +41,7 @@ class _ReaderPageState extends State<ReaderPage> {
   static const double _fontSize = 48.0;
   static const double _letterSpacing = 4.0;
   static const String _fontFamily = 'monospace';
+  static const double _pivotSpacing = 8.0; // Spacing on both sides of the red pivot letter
 
   int _calculateORP(String word) {
     int length = word.length;
@@ -134,6 +135,9 @@ class _ReaderPageState extends State<ReaderPage> {
       widthBeforePivot += prefixPainter.width;
     }
     
+    // Add spacing before the pivot
+    widthBeforePivot += _pivotSpacing;
+    
     // Measure the pivot character width to center it perfectly
     final pivotPainter = TextPainter(
       text: TextSpan(text: pivot, style: textStyle),
@@ -174,14 +178,17 @@ class _ReaderPageState extends State<ReaderPage> {
       return Text(word, style: style.copyWith(color: _lighterCharcoal));
     }
 
-    return Text.rich(
-      TextSpan(
-        children: [
-          TextSpan(text: word.substring(0, orp), style: style.copyWith(color: _cream)),
-          TextSpan(text: word.substring(orp, orp + 1), style: style.copyWith(color: _softRed)),
-          TextSpan(text: word.substring(orp + 1), style: style.copyWith(color: _cream)),
-        ],
-      ),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (orp > 0)
+          Text(word.substring(0, orp), style: style.copyWith(color: _cream)),
+        SizedBox(width: _pivotSpacing),
+        Text(word.substring(orp, orp + 1), style: style.copyWith(color: _softRed)),
+        SizedBox(width: _pivotSpacing),
+        if (orp < word.length - 1)
+          Text(word.substring(orp + 1), style: style.copyWith(color: _cream)),
+      ],
     );
   }
 
@@ -254,17 +261,24 @@ class _ReaderPageState extends State<ReaderPage> {
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // Pivot character centered
+          // Pivot character centered with spacing
           SizedBox(
-            width: pivotWidth,
+            width: pivotWidth + (_pivotSpacing * 2),
             child: Center(
-              child: Text(word.substring(orp, orp + 1), style: textStyle.copyWith(color: _softRed)),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(width: _pivotSpacing),
+                  Text(word.substring(orp, orp + 1), style: textStyle.copyWith(color: _softRed)),
+                  SizedBox(width: _pivotSpacing),
+                ],
+              ),
             ),
           ),
           // Prefix positioned to the left
           if (orp > 0)
             Positioned(
-              right: 300 + (pivotWidth / 2),
+              right: 300 + (pivotWidth / 2) + _pivotSpacing,
               child: Text(
                 word.substring(0, orp), 
                 style: textStyle.copyWith(color: _cream), 
@@ -274,7 +288,7 @@ class _ReaderPageState extends State<ReaderPage> {
           // Suffix positioned to the right
           if (orp < word.length - 1)
             Positioned(
-              left: 300 + (pivotWidth / 2),
+              left: 300 + (pivotWidth / 2) + _pivotSpacing,
               child: Text(
                 word.substring(orp + 1), 
                 style: textStyle.copyWith(color: _cream), 
