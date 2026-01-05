@@ -8,12 +8,19 @@ environment:
 
 dependencies:
   flutter:
+  
     sdk: flutter
+  http: ^1.2.0
+  google_generative_ai: ^0.4.0
+  flutter_dotenv: ^5.1.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - .env
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
 
-flutter:
-  uses-material-design: true

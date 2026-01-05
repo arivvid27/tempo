@@ -1,383 +1,326 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:google_generative_ai/google_generative_ai.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-void main() => runApp(const TempoApp());
+// -----------------------------------------------------------------------------
+// 1. APP ROOT & INITIALIZATION
+// -----------------------------------------------------------------------------
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await dotenv.load(fileName: ".env");
+  } catch (e) {
+    debugPrint("Warning: .env file not found. Secrets will not load.");
+  }
+  runApp(const TempoApp());
+}
 
 class TempoApp extends StatelessWidget {
   const TempoApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(scaffoldBackgroundColor: const Color(0xFF1A1A1A)),
-      home: const ReaderPage(),
+      title: 'Tempo',
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF1A1A1A),
+        primaryColor: const Color(0xFFE57373),
+        fontFamily: 'monospace',
+        useMaterial3: true,
+      ),
+      home: const HomePage(),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 2. DATA MODELS & TEXT PROCESSING
+// -----------------------------------------------------------------------------
+class Book {
+  final int id;
+  final String title;
+  final List<String> authors;
+  final String? coverUrl;
+  final String? textUrl;
+
+  Book({required this.id, required this.title, required this.authors, this.coverUrl, this.textUrl});
+
+  factory Book.fromJson(Map<String, dynamic> json) {
+    final formats = json['formats'] as Map<String, dynamic>? ?? {};
+    return Book(
+      id: json['id'],
+      title: json['title'] ?? 'Untitled',
+      authors: (json['authors'] as List).map((a) => a['name'].toString()).toList(),
+      coverUrl: formats['image/jpeg'],
+      textUrl: formats['text/plain; charset=utf-8'] ?? formats['text/plain'],
+    );
+  }
+}
+
+class BookProcessor {
+  static Map<String, List<String>> splitIntoChapters(String rawText) {
+    Map<String, List<String>> chapters = {};
+    
+    // Remove Gutenberg Header
+    int startIndex = rawText.indexOf('*** START OF');
+    if (startIndex != -1) {
+      int actualStart = rawText.indexOf('\n', startIndex) + 1;
+      rawText = rawText.substring(actualStart);
+    }
+
+    // RegEx for "Chapter 1", "Letter 1", "CHAPTER I", etc.
+    final RegExp chapterRegex = RegExp(r'^(Chapter|Letter|CHAPTER)\s+\d+', multiLine: true);
+    Iterable<RegExpMatch> matches = chapterRegex.allMatches(rawText);
+    
+    if (matches.isEmpty) {
+      chapters["Full Text"] = _processLines(rawText);
+      return chapters;
+    }
+
+    int lastMatchEnd = 0;
+    String currentTitle = "Introduction";
+
+    for (var match in matches) {
+      String content = rawText.substring(lastMatchEnd, match.start).trim();
+      if (content.isNotEmpty) chapters[currentTitle] = _processLines(content);
+      currentTitle = match.group(0) ?? "Unknown Section";
+      lastMatchEnd = match.start; 
+    }
+    chapters[currentTitle] = _processLines(rawText.substring(lastMatchEnd));
+
+    return chapters;
+  }
+
+  static List<String> _processLines(String text) {
+    return text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 3. SERVICES
+// -----------------------------------------------------------------------------
+class GutenbergService {
+  static Future<List<Book>> fetchBooks() async {
+    try {
+      final res = await http.get(Uri.parse('https://gutendex.com/books?languages=en'));
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body);
+        return (data['results'] as List).map((j) => Book.fromJson(j)).toList();
+      }
+    } catch (e) { debugPrint("Catalog Error: $e"); }
+    return [];
+  }
+
+  static Future<String?> fetchBookContent(String url) async {
+    try {
+      // PROXY to bypass CORS blocks in Web
+      final proxyUrl = "https://cors-anywhere.herokuapp.com/${url.replaceFirst('http://', 'https://')}";
+      final res = await http.get(Uri.parse(proxyUrl), headers: {'X-Requested-With': 'XMLHttpRequest'});
+      if (res.statusCode == 200) return res.body;
+    } catch (e) { debugPrint("Fetch Error: $e"); }
+    return null;
+  }
+}
+
+class GeminiService {
+  static Future<String> generateSummary(String title, String author) async {
+    final apiKey = dotenv.env['GEMINI_API_KEY'];
+    if (apiKey == null) return "API Key missing.";
+    try {
+      final model = GenerativeModel(model: 'gemini-1.5-flash', apiKey: apiKey);
+      final prompt = 'Summarize "$title" by $author in two short, punchy paragraphs.';
+      final response = await model.generateContent([Content.text(prompt)]);
+      return response.text ?? "Summary unavailable.";
+    } catch (e) { return "Summary failed to load."; }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 4. UI PAGES (HomePage, Catalog, Detail, Reader)
+// -----------------------------------------------------------------------------
+
+class HomePage extends StatelessWidget {
+  const HomePage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('T E M P O', style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold, letterSpacing: 8, color: Color(0xFFE57373))),
+            const SizedBox(height: 60),
+            OutlinedButton(
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CatalogPage())),
+              child: const Text('ENTER LIBRARY', style: TextStyle(color: Color(0xFFE57373))),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class CatalogPage extends StatefulWidget {
+  const CatalogPage({super.key});
+  @override
+  State<CatalogPage> createState() => _CatalogPageState();
+}
+
+class _CatalogPageState extends State<CatalogPage> {
+  List<Book> _books = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    GutenbergService.fetchBooks().then((books) => setState(() { _books = books; _loading = false; }));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Catalog'), backgroundColor: Colors.transparent),
+      body: _loading 
+        ? const Center(child: CircularProgressIndicator()) 
+        : GridView.builder(
+            padding: const EdgeInsets.all(16),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, childAspectRatio: 0.7, crossAxisSpacing: 16, mainAxisSpacing: 16),
+            itemCount: _books.length,
+            itemBuilder: (context, i) => _buildBookCard(_books[i]),
+          ),
+    );
+  }
+
+  Widget _buildBookCard(Book book) {
+    return GestureDetector(
+      onTap: () => showDialog(context: context, builder: (_) => BookDetailModal(book: book)),
+      child: Column(
+        children: [
+          Expanded(child: book.coverUrl != null 
+            ? Image.network(book.coverUrl!, errorBuilder: (_,__,___) => const Icon(Icons.book, size: 50)) 
+            : const Icon(Icons.book)),
+          Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+}
+
+class BookDetailModal extends StatefulWidget {
+  final Book book;
+  const BookDetailModal({super.key, required this.book});
+  @override
+  State<BookDetailModal> createState() => _BookDetailModalState();
+}
+
+class _BookDetailModalState extends State<BookDetailModal> {
+  String _summary = "Summarizing with Gemini...";
+  bool _isReading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    GeminiService.generateSummary(widget.book.title, widget.book.authors.first).then((s) => setState(() => _summary = s));
+  }
+
+  void _startReading() async {
+    if (widget.book.textUrl == null) return;
+    setState(() => _isReading = true);
+    final raw = await GutenbergService.fetchBookContent(widget.book.textUrl!);
+    if (raw != null && mounted) {
+      final chapters = BookProcessor.splitIntoChapters(raw);
+      Navigator.pop(context);
+      Navigator.push(context, MaterialPageRoute(builder: (_) => ReaderPage(
+        chapterTitle: chapters.keys.first, 
+        sentences: chapters.values.first,
+      )));
+    }
+    setState(() => _isReading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF1A1A1A),
+      title: Text(widget.book.title),
+      content: SingleChildScrollView(child: Text(_summary, style: const TextStyle(color: Colors.grey))),
+      actions: [
+        if (_isReading) const CircularProgressIndicator() 
+        else TextButton(onPressed: _startReading, child: const Text("READ NOW", style: TextStyle(color: Color(0xFFE57373)))),
+      ],
     );
   }
 }
 
 class ReaderPage extends StatefulWidget {
-  const ReaderPage({super.key});
+  final String chapterTitle;
+  final List<String> sentences;
+  const ReaderPage({super.key, required this.chapterTitle, required this.sentences});
   @override
   State<ReaderPage> createState() => _ReaderPageState();
 }
 
 class _ReaderPageState extends State<ReaderPage> {
-  final List<String> _words = "Welcome to Tempo. The red letter stays still. minute. up. on. Everything is aligned.".split(" ");
   int _currentIndex = 0;
-  Timer? _timer;
   bool _isPlaying = false;
-  bool _showRestart = false;
-  bool _isHoveringRestart = false;
+  Timer? _timer;
   int _wpm = 300;
-  bool _showSentenceContext = false; 
 
-  final Color _cream = const Color(0xFFF5F5DC);
-  final Color _softRed = const Color(0xFFE57373);
-  final Color _lightCharcoal = const Color(0xFF2C2C2C);
-  final Color _lighterCharcoal = const Color(0xFF3A3A3A);
-
-  // Constants for pixel-perfect alignment
-  static const double _fontSize = 48.0;
-  static const double _letterSpacing = 4.0;
-  static const String _fontFamily = 'monospace';
-  static const double _pivotSpacing = 8.0; // Spacing on both sides of the red pivot letter
-
-  int _calculateORP(String word) {
-    int length = word.length;
-    if (length == 1) return 0;
-    if (length <= 3) return 1;
-    return (length * 0.35).floor();
-  }
-
-  void _runTimer() {
-    _timer?.cancel();
-    int baseMs = (60000 / _wpm).round();
-    String currentWord = _words[_currentIndex];
-    bool isEndOfSentence = currentWord.endsWith('.') || currentWord.endsWith('?') || currentWord.endsWith('!');
-    int duration = isEndOfSentence ? (baseMs * 2) : baseMs;
-
-    _timer = Timer(Duration(milliseconds: duration), () {
-      if (!mounted) return;
-      setState(() {
-        if (_currentIndex < _words.length - 1) {
-          _currentIndex++;
-          _runTimer();
+  void _toggle() {
+    setState(() => _isPlaying = !_isPlaying);
+    if (_isPlaying) {
+      _timer = Timer.periodic(Duration(milliseconds: (60000 / _wpm).round()), (t) {
+        if (_currentIndex < widget.sentences.length - 1) {
+          setState(() => _currentIndex++);
         } else {
-          _isPlaying = false;
-          _showRestart = true;
+          t.cancel();
+          setState(() => _isPlaying = false);
         }
       });
-    });
-  }
-
-  void _togglePlayback() {
-    if (_showRestart) return;
-    if (_isPlaying) { _timer?.cancel(); } else { _runTimer(); }
-    setState(() => _isPlaying = !_isPlaying);
-  }
-
-  void _updateWPM(int delta) {
-    setState(() => _wpm = (_wpm + delta).clamp(30, 900));
-    if (_isPlaying) _runTimer();
-  }
-
-  Widget _buildMovingSentence(double screenWidth) {
-    const textStyle = TextStyle(
-      fontSize: _fontSize,
-      fontFamily: _fontFamily,
-      letterSpacing: _letterSpacing,
-    );
-
-    // Measure the actual width of the word spacing (3 spaces)
-    final spacePainter = TextPainter(
-      text: const TextSpan(text: '  ', style: textStyle),
-      textDirection: TextDirection.ltr,
-    );
-    spacePainter.layout();
-    final wordSpacing = spacePainter.width;
-
-    // Calculate the actual width before the pivot character
-    double widthBeforePivot = 0;
-    
-    // Add width of all words before the current word
-    for (int i = 0; i < _currentIndex; i++) {
-      final wordPainter = TextPainter(
-        text: TextSpan(text: _words[i], style: textStyle),
-        textDirection: TextDirection.ltr,
-      );
-      wordPainter.layout();
-      widthBeforePivot += wordPainter.width;
-      
-      // Add spacing after word (except after the last word before current)
-      if (i < _currentIndex - 1) {
-        widthBeforePivot += wordSpacing;
-      }
+    } else {
+      _timer?.cancel();
     }
-    
-    // Add spacing before current word if there are words before it
-    if (_currentIndex > 0) {
-      widthBeforePivot += wordSpacing;
-    }
-    
-    // Add width of the prefix (characters before the pivot) of the current word
-    String currentWord = _words[_currentIndex];
-    int orpIndex = _calculateORP(currentWord);
-    String prefix = currentWord.substring(0, orpIndex);
-    String pivot = currentWord.substring(orpIndex, orpIndex + 1);
-    
-    if (prefix.isNotEmpty) {
-      final prefixPainter = TextPainter(
-        text: TextSpan(text: prefix, style: textStyle),
-        textDirection: TextDirection.ltr,
-      );
-      prefixPainter.layout();
-      widthBeforePivot += prefixPainter.width;
-    }
-    
-    // Add spacing before the pivot
-    widthBeforePivot += _pivotSpacing;
-    
-    // Measure the pivot character width to center it perfectly
-    final pivotPainter = TextPainter(
-      text: TextSpan(text: pivot, style: textStyle),
-      textDirection: TextDirection.ltr,
-    );
-    pivotPainter.layout();
-    double pivotWidth = pivotPainter.width;
-
-    // Center the pivot character: screen center - width before pivot - half of pivot width
-    double screenCenter = screenWidth / 2;
-    double xOffset = screenCenter - widthBeforePivot - (pivotWidth / 2);
-
-    return Transform(
-      transform: Matrix4.translationValues(xOffset, 0, 0),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: List.generate(_words.length, (index) {
-          String word = _words[index];
-          int orp = _calculateORP(word);
-          
-          return Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildWordSpans(word, orp, index == _currentIndex),
-              if (index < _words.length - 1) 
-                SizedBox(width: wordSpacing),
-            ],
-          );
-        }),
-      ),
-    );
   }
 
-  Widget _buildWordSpans(String word, int orp, bool isActive) {
-    const style = TextStyle(fontSize: _fontSize, fontFamily: _fontFamily, letterSpacing: _letterSpacing);
-    
-    if (!isActive) {
-      return Text(word, style: style.copyWith(color: _lighterCharcoal));
-    }
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (orp > 0)
-          Text(word.substring(0, orp), style: style.copyWith(color: _cream)),
-        SizedBox(width: _pivotSpacing),
-        Text(word.substring(orp, orp + 1), style: style.copyWith(color: _softRed)),
-        SizedBox(width: _pivotSpacing),
-        if (orp < word.length - 1)
-          Text(word.substring(orp + 1), style: style.copyWith(color: _cream)),
-      ],
-    );
-  }
+  @override
+  void dispose() { _timer?.cancel(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
-    double screenWidth = MediaQuery.of(context).size.width;
-
     return Scaffold(
-      body: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.arrowUp): () => _updateWPM(25),
-          const SingleActivator(LogicalKeyboardKey.arrowDown): () => _updateWPM(-25),
-          const SingleActivator(LogicalKeyboardKey.space): _togglePlayback,
-        },
-        child: Focus(
-          autofocus: true,
-          child: GestureDetector(
-            onTap: _togglePlayback,
-            child: Container(
-              color: Colors.transparent,
-              child: Stack(
-                children: [
-                  // 1. Center Guides
-                  Center(
-                    child: CustomPaint(
-                      size: const Size(double.infinity, 140),
-                      painter: RSVPGuidePainter(guideColor: _lightCharcoal),
-                    ),
-                  ),
-
-                  // 2. The Moving Tape
-                  Center(
-                    child: SingleChildScrollView( // Prevents overflow if zoomed
-                      scrollDirection: Axis.horizontal,
-                      physics: const NeverScrollableScrollPhysics(),
-                      child: _showSentenceContext 
-                        ? _buildMovingSentence(screenWidth)
-                        : _buildStaticRSVP(),
-                    ),
-                  ),
-
-                  // 3. UI Controls
-                  Positioned(bottom: 40, right: 40, child: _buildControls()),
-                  _buildRestartButton(),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStaticRSVP() {
-    String word = _words[_currentIndex];
-    int orp = _calculateORP(word);
-    
-    // Measure the pivot character to center it perfectly
-    const textStyle = TextStyle(fontSize: _fontSize, fontFamily: _fontFamily, letterSpacing: _letterSpacing);
-    final pivotPainter = TextPainter(
-      text: TextSpan(text: word.substring(orp, orp + 1), style: textStyle),
-      textDirection: TextDirection.ltr,
-    );
-    pivotPainter.layout();
-    double pivotWidth = pivotPainter.width;
-
-    return SizedBox(
-      width: 600,
-      height: 100,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          // Pivot character centered with spacing
-          SizedBox(
-            width: pivotWidth + (_pivotSpacing * 2),
-            child: Center(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(width: _pivotSpacing),
-                  Text(word.substring(orp, orp + 1), style: textStyle.copyWith(color: _softRed)),
-                  SizedBox(width: _pivotSpacing),
-                ],
-              ),
-            ),
-          ),
-          // Prefix positioned to the left
-          if (orp > 0)
-            Positioned(
-              right: 300 + (pivotWidth / 2) + _pivotSpacing,
-              child: Text(
-                word.substring(0, orp), 
-                style: textStyle.copyWith(color: _cream), 
-                textAlign: TextAlign.right,
-              ),
-            ),
-          // Suffix positioned to the right
-          if (orp < word.length - 1)
-            Positioned(
-              left: 300 + (pivotWidth / 2) + _pivotSpacing,
-              child: Text(
-                word.substring(orp + 1), 
-                style: textStyle.copyWith(color: _cream), 
-                textAlign: TextAlign.left,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildControls() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        GestureDetector(
-          onTap: () => setState(() => _showSentenceContext = !_showSentenceContext),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
+      appBar: AppBar(title: Text(widget.chapterTitle), backgroundColor: Colors.transparent),
+      body: GestureDetector(
+        onTap: _toggle,
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Text('Context', style: TextStyle(color: _lighterCharcoal, fontSize: 12, fontStyle: FontStyle.italic)),
-              const SizedBox(width: 8),
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                width: 38, height: 20,
-                decoration: BoxDecoration(
-                  color: _showSentenceContext ? _softRed : _lightCharcoal,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: AnimatedAlign(
-                  duration: const Duration(milliseconds: 200),
-                  alignment: _showSentenceContext ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Container(
-                    width: 14, height: 14,
-                    margin: const EdgeInsets.symmetric(horizontal: 3),
-                    decoration: BoxDecoration(color: _cream, shape: BoxShape.circle),
-                  ),
+              // Clean Text: No effects, No warp
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 40),
+                child: Text(
+                  widget.sentences[_currentIndex],
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 28, height: 1.4, color: Color(0xFFF5F5DC)),
                 ),
               ),
+              const SizedBox(height: 100),
+              Text('${_currentIndex + 1} / ${widget.sentences.length}', style: const TextStyle(color: Colors.grey)),
+              if (!_isPlaying) const Padding(
+                padding: EdgeInsets.only(top: 20),
+                child: Text("TAP TO PLAY", style: TextStyle(color: Color(0xFFE57373), letterSpacing: 2)),
+              )
             ],
           ),
         ),
-        const SizedBox(height: 8),
-        Text('$_wpm wpm', style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 18)),
-      ],
-    );
-  }
-
-  Widget _buildRestartButton() {
-    return Positioned(
-      bottom: 40, left: 40,
-      child: AnimatedOpacity(
-        opacity: _showRestart ? 1.0 : 0.0,
-        duration: const Duration(milliseconds: 500),
-        child: IgnorePointer(
-          ignoring: !_showRestart,
-          child: MouseRegion(
-            onEnter: (_) => setState(() => _isHoveringRestart = true),
-            onExit: (_) => setState(() => _isHoveringRestart = false),
-            child: GestureDetector(
-              onTap: () => setState(() { _currentIndex = 0; _showRestart = false; }),
-              child: AnimatedRotation(
-                turns: _isHoveringRestart ? 1 : 0,
-                duration: const Duration(milliseconds: 600),
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: _lightCharcoal, shape: BoxShape.circle),
-                  child: Icon(Icons.refresh, color: _cream, size: 28),
-                ),
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }
-}
-
-class RSVPGuidePainter extends CustomPainter {
-  final Color guideColor;
-  RSVPGuidePainter({required this.guideColor});
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = guideColor..strokeWidth = 2.0..style = PaintingStyle.stroke;
-    double centerX = size.width / 2;
-    canvas.drawLine(const Offset(0, 0), Offset(size.width, 0), paint);
-    canvas.drawLine(Offset(0, size.height), Offset(size.width, size.height), paint);
-    canvas.drawLine(Offset(centerX, 0), Offset(centerX, 20), paint);
-    canvas.drawLine(Offset(centerX, size.height), Offset(centerX, size.height - 20), paint);
-  }
-  @override bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
