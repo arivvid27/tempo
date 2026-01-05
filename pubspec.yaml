@@ -12,6 +12,7 @@ dependencies:
   http: ^1.2.0
   epubx: ^3.0.0
   html: ^0.15.4
+  shared_preferences: ^2.2.2
 
 flutter:
   uses-material-design: true
