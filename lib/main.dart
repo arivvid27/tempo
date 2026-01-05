@@ -115,8 +115,16 @@ class EpubProcessor {
           chapters.add(ParsedChapter(ch.Title ?? "Untitled", words, sentences, wordMap));
         }
       }
+      
+      if (chapters.isEmpty) {
+        debugPrint("EpubProcessor: No chapters found in EPUB");
+        return null;
+      }
+      
+      debugPrint("EpubProcessor: Successfully processed ${chapters.length} chapters");
       return ParsedBookData(chapters);
     } catch (e) {
+      debugPrint("EpubProcessor Error: $e");
       return null;
     }
   }
@@ -233,15 +241,85 @@ class BookDetailOverlay extends StatefulWidget {
 class _BookDetailOverlayState extends State<BookDetailOverlay> {
   bool _downloading = false;
 
-  void _startReading() async {
-    if (widget.book.epubUrl == null) return;
-    setState(() => _downloading = true);
-    final res = await http.get(Uri.parse("https://api.allorigins.win/raw?url=${Uri.encodeComponent(widget.book.epubUrl!)}"));
-    final data = await EpubProcessor.process(res.bodyBytes);
-    if (data != null && mounted) {
-      Navigator.pop(context);
-      Navigator.push(context, MaterialPageRoute(builder: (_) => ReaderPage(bookData: data)));
+  Future<Uint8List?> _downloadEpub(String url) async {
+    // Try direct download first
+    try {
+      debugPrint("Attempting direct download from: $url");
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 30));
+      if (res.statusCode == 200) {
+        debugPrint("Direct download successful");
+        return res.bodyBytes;
+      }
+    } catch (e) {
+      debugPrint("Direct download failed: $e");
     }
+    
+    // Fallback to proxy
+    try {
+      final proxyUrl = "https://api.allorigins.win/raw?url=${Uri.encodeComponent(url)}";
+      debugPrint("Attempting proxy download from: $proxyUrl");
+      final res = await http.get(Uri.parse(proxyUrl)).timeout(const Duration(seconds: 30));
+      if (res.statusCode == 200) {
+        debugPrint("Proxy download successful");
+        return res.bodyBytes;
+      }
+    } catch (e) {
+      debugPrint("Proxy download failed: $e");
+    }
+    
+    return null;
+  }
+
+  void _startReading() async {
+    if (widget.book.epubUrl == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("No EPUB URL available for this book."))
+        );
+      }
+      return;
+    }
+    setState(() => _downloading = true);
+    
+    try {
+      final bytes = await _downloadEpub(widget.book.epubUrl!);
+      
+      if (bytes == null) {
+        if (mounted) {
+          setState(() => _downloading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Failed to download EPUB. Please check your internet connection and try again."))
+          );
+        }
+        return;
+      }
+      
+      final data = await EpubProcessor.process(bytes);
+      
+      if (data == null || data.chapters.isEmpty) {
+        if (mounted) {
+          setState(() => _downloading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Failed to process EPUB. The file may be corrupted or empty."))
+          );
+        }
+        return;
+      }
+      
+      if (mounted) {
+        Navigator.pop(context);
+        Navigator.push(context, MaterialPageRoute(builder: (_) => ReaderPage(bookData: data)));
+      }
+    } catch (e) {
+      debugPrint("Error downloading/processing EPUB: $e");
+      if (mounted) {
+        setState(() => _downloading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error: ${e.toString()}"))
+        );
+      }
+    }
+    
     if (mounted) setState(() => _downloading = false);
   }
 
